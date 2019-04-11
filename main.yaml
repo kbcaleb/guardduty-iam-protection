@@ -1,0 +1,196 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: 'Use GuardDuty and CloudWatch events to lockout suspicous API and console activity.'
+
+
+Parameters: 
+  AlertEmail:
+    Description: 'Email address for alerts - TESTING'
+    Type: String
+  BlacklistUsage:
+    AllowedValues:
+    - true
+    - false
+    Default: true
+    Description: 'Block API usage invoked from an IP address that is included on a threat list that you uploaded to GuardDuty.'
+    Type: String
+  MaliciousUsage:
+    AllowedValues:
+    - true
+    - false
+    Default: true
+    Description: 'Block API usage invoked from a known malicious IP address.'
+    Type: String
+  MultiGeoUsage:
+    AllowedValues:
+    - true
+    - false
+    Default: true
+    Description: 'Block API usage observed around the same time in various geographical locations.'
+    Type: String
+  TorUsage:
+    AllowedValues:
+    - true
+    - false
+    Default: true
+    Description: 'Block API usage from Tor exit node IP address.'
+    Type: String
+
+Conditions:
+  BlacklistCondition: !Equals [!Ref BlacklistUsage, 'true']
+  MaliciousCondition: !Equals [!Ref MaliciousUsage, 'true']
+  MultiGeoCondition: !Equals [!Ref MultiGeoUsage, 'true']
+  TorUsageCondition: !Equals [!Ref TorUsage, 'true']
+
+Resources:
+  Topic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+      - Endpoint: !Ref AlertEmail
+        Protocol: 'email'
+  TopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - 'lambda.amazonaws.com'
+          Action: 'sns:Publish'
+          Resource: '*'
+      Topics:
+      - !Ref Topic
+  LambdaRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: 'lambda.amazonaws.com'
+          Action:
+          - 'sts:AssumeRole'
+      Path: '/'
+      ManagedPolicyArns:
+      - 'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+      Policies:
+      - PolicyName: sns
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'sns:Publish'
+            Resource: !Ref Topic
+      - PolicyName: iam
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+            - 'iam:DeleteLoginProfile'
+            - 'iam:UpdateAccessKey'
+            - 'iam:ListAccessKeys'
+            Resource: '*'
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: "GuardDuty IAM Protection"
+      Handler:  'index.lambda_handler'
+      MemorySize: 128
+      Role: !GetAtt LambdaRole.Arn
+      Runtime: python3.6
+      Timeout: 60
+      Environment:
+        Variables:
+          TOPIC: !Ref Topic
+      Code:
+        ZipFile: |
+          import os
+          import json
+          import time
+          import boto3
+          import logging
+          import botocore.session
+          from botocore.exceptions import ClientError
+          session = botocore.session.get_session()
+
+          logging.basicConfig(level=logging.DEBUG)
+          logger=logging.getLogger(__name__)
+
+          def lambda_handler(event, context):
+              logger.setLevel(logging.DEBUG)
+              topic = os.environ['TOPIC']
+              eventType = event['detail']['type']
+              userName = event['detail']['resource']['accessKeyDetails']['userName']
+              userType = event['detail']['resource']['accessKeyDetails']['userType']
+              logger.debug("Event is-- %s" %event)
+              logger.debug("Event Type is--- %s" %eventType)
+              logger.debug("User Type is--- %s" %userType)
+              logger.debug("SNSARN is-- %s" %topic)
+              sns = boto3.client('sns')
+              iam = boto3.client('iam')
+
+              try:
+                  # Notify
+                  snspublish = sns.publish(
+                          TargetArn = topic,
+                          Subject="ALERT: GuardDuty IAM Abuse alert for " + userName + " - " + eventType,
+                          Message=json.dumps({'default': json.dumps(event)}),
+                          MessageStructure='json'
+                      )
+                  logger.debug("SNS Publish Response- %s" %snspublish)
+              except ClientError as e:
+                  logger.error("An error occured: %s" %e)
+
+              if (userType == 'IAMUser'):
+                  if (userName != 'GeneratedFindingUserName'):
+                      # Disable all keys
+                      try:
+                          keys = iam.list_access_keys(UserName='root')
+                          for key in  keys['AccessKeyMetadata']:
+                              keyId = (key['AccessKeyId'])
+                              disableuserkeys = iam.update_access_key(AccessKeyId=keyId, Status='Inactive')
+                          logger.debug("Response on disable root user access keys- %s" %disableuserkeys)
+                      except ClientError as e:
+                          logger.error("An error occured: %s" %e) 
+                      # Disable console access for non-root IAMusers
+                      if (userName != 'root'):
+                          # Disable console password
+                          try:
+                              disableuserpass = iam.delete_login_profile(UserName=userName)
+                              logger.debug("Response on disable user password to console- %s" %disableuserpass)
+                          except ClientError as e:
+                              logger.error("An error occured: %s" %e)
+                  else:
+                      logger.info("Generated findings user detected no remediation necessary.")
+  EventRule:
+    Type: AWS::Events::Rule
+    Condition: TorUsageCondition
+    Properties:
+      Description: GuardDuty IAM violations
+      EventPattern:
+        source:
+        - "aws.guardduty"
+        detail-type:
+        - "GuardDuty Finding"
+        detail:
+          type:
+          - !If [TorUsageCondition, "UnauthorizedAccess:IAMUser/TorIPCaller", "AWS::NoValue"]
+          - !If [MaliciousCondition, "UnauthorizedAccess:IAMUser/MaliciousIPCaller", "AWS::NoValue"]
+          - !If [MultiGeoCondition, "UnauthorizedAccess:IAMUser/ConsoleLoginSuccess.B", "AWS::NoValue"]
+          - !If [BlacklistCondition, "UnauthorizedAccess:IAMUser/MaliciousIPCaller.Custom", "AWS::NoValue"]
+      State: "ENABLED"
+      Targets:
+      - Arn: !GetAtt LambdaFunction.Arn
+        Id: "GuardDutyIAMAbuse"
+
+Outputs:
+  Topic:
+    Value: !Ref Topic
+  LambdaRole:
+    Value: !Ref LambdaRole
+  LambdaFunction:
+    Value: !Ref LambdaFunction
+  EventRule:
+    Value: !Ref EventRule
