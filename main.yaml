@@ -166,7 +166,6 @@ Resources:
                       logger.info("Generated findings user detected no remediation necessary.")
   EventRule:
     Type: AWS::Events::Rule
-    Condition: TorUsageCondition
     Properties:
       Description: GuardDuty IAM violations
       EventPattern:
