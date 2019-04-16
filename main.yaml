@@ -147,16 +147,15 @@ Resources:
                   if (userName != 'GeneratedFindingUserName'):
                       # Disable all keys
                       try:
-                          keys = iam.list_access_keys(UserName='root')
+                          keys = iam.list_access_keys(UserName=userName)
                           for key in  keys['AccessKeyMetadata']:
                               keyId = (key['AccessKeyId'])
                               disableuserkeys = iam.update_access_key(AccessKeyId=keyId, Status='Inactive')
-                          logger.debug("Response on disable root user access keys- %s" %disableuserkeys)
+                          logger.debug("Response on disable user access keys- %s" %disableuserkeys)
                       except ClientError as e:
                           logger.error("An error occured: %s" %e) 
                       # Disable console access for non-root IAMusers
                       if (userName != 'root'):
-                          # Disable console password
                           try:
                               disableuserpass = iam.delete_login_profile(UserName=userName)
                               logger.debug("Response on disable user password to console- %s" %disableuserpass)
