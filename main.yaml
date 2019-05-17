@@ -127,6 +127,7 @@ Resources:
               logger.debug("Event is-- %s" %event)
               logger.debug("Event Type is--- %s" %eventType)
               logger.debug("User Type is--- %s" %userType)
+              logger.debug("User Name is--- %s" %userName)
               logger.debug("SNSARN is-- %s" %topic)
               sns = boto3.client('sns')
               iam = boto3.client('iam')
@@ -135,9 +136,9 @@ Resources:
                   # Notify
                   snspublish = sns.publish(
                           TargetArn = topic,
-                          Subject="ALERT: GuardDuty IAM Abuse alert for " + userName + " - " + eventType,
-                          Message=json.dumps({'default': json.dumps(event)}),
-                          MessageStructure='json'
+                          Subject = "ALERT: GuardDuty alert for " + userName + " " + eventType,
+                          Message = json.dumps({'default': json.dumps(event)}),
+                          MessageStructure = 'json'
                       )
                   logger.debug("SNS Publish Response- %s" %snspublish)
               except ClientError as e:
